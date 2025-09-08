@@ -1,0 +1,646 @@
+group 'com.vitalex.ramus'
+version '1.0-SNAPSHOT'
+
+apply plugin: 'com.bmuschko.izpack'
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.bmuschko:gradle-izpack-plugin:3.1'
+    }
+}
+
+dependencies {
+    izpack 'org.codehaus.izpack:izpack-standalone-compiler:4.3.4'
+}
+
+
+allprojects {
+    apply plugin: 'java'
+    sourceCompatibility = 1.8
+    targetCompatibility = 1.8
+
+    repositories {
+        mavenCentral()
+        maven {
+            url "https://oss.sonatype.org/content/repositories/snapshots/"
+        }
+    }
+    compileJava {
+        options.encoding = "UTF-8"
+    }
+}
+
+task copyJars(type: Copy, dependsOn: subprojects.jar) {
+    from(subprojects.jar)
+    into project.file('dest/full/lib/ramus')
+}
+
+task moveStartup{
+    doLast{
+        mkdir('dest/full/bin')
+        file('dest/full/lib/ramus/startup-1.0-SNAPSHOT.jar')
+        .renameTo('dest/full/bin/ramus-startup.jar')
+        //delete not needed files
+        file('dest/full/lib/ramus/chart-common-1.0-SNAPSHOT.jar').delete()
+        file('dest/full/lib/ramus/chart-core-1.0-SNAPSHOT.jar').delete()
+        file('dest/full/lib/ramus/chart-gui-1.0-SNAPSHOT.jar').delete()
+        file('dest/full/lib/ramus/client-1.0-SNAPSHOT.jar').delete()
+        file('dest/full/lib/ramus/local-client-1.0-SNAPSHOT.jar').delete()
+        file('dest/full/lib/ramus/net-common-1.0-SNAPSHOT.jar').delete()
+        file('dest/full/lib/ramus/server-1.0-SNAPSHOT.jar').delete()
+    }
+}
+
+task copyDeps(type: Copy) {
+    from(subprojects.configurations.compileClasspath)
+    into project.file('dest/full/lib/thirdparty')
+}
+
+task copyFiles(dependsOn: [copyJars, copyDeps, moveStartup])
+
+task windowsInstallerDocker(type:Exec, dependsOn: [copyFiles]) {
+    workingDir './dest'
+
+    commandLine './build-installer', '--docker'
+}
+
+task windowsInstaller(type:Exec, dependsOn: [copyFiles]) {
+    workingDir './dest'
+
+    commandLine './build-installer'
+}
+
+izpack {
+   // baseDir = file("$buildDir/assemble/izpack")
+    installFile = file('dest/izpack/ramus.xml')
+    outputFile = file("$buildDir/dest/full/ramus-2.0-installer.jar")
+    compression = 'deflate'
+    compressionLevel = 9
+}
+
+// ---------- macOS packaging (.app + .dmg) ----------
+
+def macAppRoot = file("$buildDir/macos/Ramus.app/Contents")
+def macMacOSDir = new File(macAppRoot, 'MacOS')
+def macResDir = new File(macAppRoot, 'Resources')
+def macAppResDir = new File(macResDir, 'app')
+
+task macPrepare(type: Copy, dependsOn: [copyJars, copyDeps]) {
+    description = 'Prepare app resources for macOS bundle'
+    doFirst {
+        // Clean previous app bundle to avoid permission issues on re-copy
+        def appDir = file("$buildDir/macos/Ramus.app")
+        if (appDir.exists()) project.delete(appDir)
+        macMacOSDir.mkdirs()
+        macResDir.mkdirs()
+        macAppResDir.mkdirs()
+    }
+    // Pick startup jar from built subproject jars and rename
+    from('dest/full/lib/ramus') {
+        include 'startup-*.jar'
+        into 'bin'
+        rename { 'ramus-startup.jar' }
+    }
+    from('dest/full/lib') {
+        into 'lib'
+    }
+    into(new File(macAppResDir, ''))
+}
+
+task macBundle(dependsOn: macPrepare) {
+    description = 'Create Ramus.app bundle structure for macOS'
+    doLast {
+        macMacOSDir.mkdirs()
+        macResDir.mkdirs()
+
+        // Copy launcher and Info.plist
+        copy {
+            from('dest/macos/launcher.sh')
+            into(macMacOSDir)
+            rename { 'ramus' }
+            fileMode = 0755
+        }
+        copy {
+            from('dest/macos/Info.plist')
+            into(macAppRoot)
+        }
+
+        // Copy application icon if available
+        File icns1 = file('dest/macos/ramus.icns')
+        File icns2 = file("$buildDir/macos/ramus.icns")
+        if (icns1.exists()) {
+            copy { from(icns1); into(macResDir) }
+        } else if (icns2.exists()) {
+            copy { from(icns2); into(macResDir) }
+        } else {
+            println "[macBundle] No .icns icon found. Place it at dest/macos/ramus.icns to include."
+        }
+    }
+}
+
+// Auto-download JREs for macOS (defaults to Temurin 11). Override with -PjreX64Url / -PjreArm64Url
+task macFetchJre() {
+    description = 'Download JRE for x86_64 and arm64 into dest/macos/jre/* if missing'
+    doLast {
+        def base = file('dest/macos/jre')
+        def cache = file("$buildDir/jre_cache")
+        base.mkdirs(); cache.mkdirs()
+
+        def downloadTo = { String urlStr, File destFile ->
+            def url = new URL(urlStr)
+            url.withInputStream { i -> destFile.withOutputStream { it << i } }
+        }
+
+        def fetch = { String arch, String urlProp, String defaultUrl ->
+            def dest = new File(base, arch)
+            def javaBin = new File(dest, 'bin/java')
+            if (javaBin.exists()) { println "[macFetchJre] ${arch} already present at ${dest}"; return true }
+            def url = (project.findProperty(urlProp) ?: defaultUrl) as String
+            if (!url) { println "[macFetchJre] No URL for ${arch}"; return false }
+            println "[macFetchJre] Downloading ${arch} from ${url}"
+            def fileName = url.contains('/') ? url.substring(url.lastIndexOf('/')+1) : ("${arch}.tar.gz")
+            def dl = new File(cache, fileName)
+            if (!dl.exists()) {
+                try { downloadTo(url, dl) } catch (Exception ex) {
+                    println "[macFetchJre] Primary URL failed for ${arch}: ${ex.class.simpleName}: ${ex.message}"
+                    dl.delete()
+                    return false
+                }
+            }
+            def extractDir = new File(cache, "extract-${arch}")
+            if (extractDir.exists()) project.delete(extractDir)
+            extractDir.mkdirs()
+            if (fileName.endsWith('.tar.gz') || fileName.endsWith('.tgz')) {
+                copy { from tarTree(resources.gzip(dl)); into extractDir }
+            } else if (fileName.endsWith('.zip')) {
+                copy { from zipTree(dl); into extractDir }
+            } else {
+                // Some APIs stream binary without extension; try tar.gz first
+                try {
+                    copy { from tarTree(resources.gzip(dl)); into extractDir }
+                } catch (Throwable t) {
+                    throw new GradleException("Unsupported archive type for ${fileName}")
+                }
+            }
+            // Find Home with bin/java (supports .../Contents/Home or direct)
+            File home = null
+            extractDir.eachDirRecurse { d ->
+                if (home == null) {
+                    def j = new File(d, 'bin/java')
+                    if (j.exists()) home = d
+                }
+            }
+            if (home == null) {
+                // Try Contents/Home
+                extractDir.eachDirRecurse { d ->
+                    if (home == null) {
+                        def c = new File(new File(d, 'Contents'), 'Home')
+                        if (new File(c, 'bin/java').exists()) home = c
+                    }
+                }
+            }
+            if (home == null) throw new GradleException("Could not locate JRE home in ${extractDir}")
+            copy { from home; into dest }
+            println "[macFetchJre] Installed ${arch} JRE into ${dest}"
+            return true
+        }
+
+        // Defaults: Adoptium Temurin 11 latest (tries JRE first, then JDK)
+        def defX64Jre = 'https://api.adoptium.net/v3/binary/latest/11/ga/mac/x64/jre/hotspot/normal/adoptium'
+        def defArmJre = 'https://api.adoptium.net/v3/binary/latest/11/ga/mac/aarch64/jre/hotspot/normal/adoptium'
+        def defX64Jdk = 'https://api.adoptium.net/v3/binary/latest/11/ga/mac/x64/jdk/hotspot/normal/adoptium'
+        def defArmJdk = 'https://api.adoptium.net/v3/binary/latest/11/ga/mac/aarch64/jdk/hotspot/normal/adoptium'
+
+        def okX64 = fetch('x86_64', 'jreX64Url', defX64Jre)
+        if (!okX64) {
+            println "[macFetchJre] Falling back to JDK x86_64"
+            fetch('x86_64', 'jdkX64Url', defX64Jdk)
+        }
+        def okArm = fetch('arm64',  'jreArm64Url', defArmJre)
+        if (!okArm) {
+            println "[macFetchJre] Falling back to JDK arm64"
+            fetch('arm64', 'jdkArm64Url', defArmJdk)
+        }
+    }
+}
+
+// Embed JRE(s) so app runs on a clean macOS install
+task macEmbedJre(dependsOn: [macBundle, macFetchJre]) {
+    description = 'Embed JRE for x86_64 and/or arm64 into .app bundle'
+    doLast {
+        def jreBase = new File(macResDir, 'jre')
+        jreBase.mkdirs()
+
+        def resolveDir = { String propName, String envName, String fallbackPath ->
+            def p = project.findProperty(propName) as String
+            if (p) return file(p)
+            def e = System.getenv(envName)
+            if (e) return file(e)
+            def f = file(fallbackPath)
+            return f.exists() ? f : null
+        }
+
+        def copyJre = { File src, String arch ->
+            if (!src) return false
+            def java = new File(src, 'bin/java')
+            File homeJava = new File(new File(new File(src, 'Contents'), 'Home'), 'bin/java')
+            if (!java.exists() && homeJava.exists()) src = new File(new File(src, 'Contents'), 'Home')
+            java = new File(src, 'bin/java')
+            if (!java.exists()) {
+                println "[macEmbedJre] Skipping ${arch}: no bin/java under ${src}"
+                return false
+            }
+            def targetArchDir = new File(jreBase, arch)
+            if (targetArchDir.exists()) {
+                project.delete(targetArchDir)
+            }
+            targetArchDir.mkdirs()
+            copy { from(src); into(targetArchDir) }
+            println "[macEmbedJre] Embedded JRE for ${arch} from ${src}"
+            return true
+        }
+
+        // Sources for JRE paths (priority): -PjreX64/-PjreArm64, env JRE_X64_DIR/JRE_ARM64_DIR, dest/macos/jre/x86_64 or arm64
+        def jreX64 = resolveDir('jreX64', 'JRE_X64_DIR', 'dest/macos/jre/x86_64')
+        def jreArm = resolveDir('jreArm64', 'JRE_ARM64_DIR', 'dest/macos/jre/arm64')
+
+        def okX64 = copyJre(jreX64, 'x86_64')
+        def okArm = copyJre(jreArm, 'arm64')
+
+        if (!okX64 && !okArm) {
+            println "[macEmbedJre] No JRE embedded. Provide -PjreX64=... and/or -PjreArm64=..., or set env JRE_X64_DIR/JRE_ARM64_DIR, or place them under dest/macos/jre/<arch>"
+        }
+    }
+}
+
+task macBundleWithJre(dependsOn: macEmbedJre) {
+    description = 'Create Ramus.app bundle with embedded JRE(s)'
+}
+
+task macDmg(dependsOn: macBundle) {
+    description = 'Build Ramus.dmg disk image for macOS (drag-and-drop)'
+    doLast {
+        def base = file("$buildDir/macos")
+        def stage = new File(base, 'dmg')
+        def app = new File(base, 'Ramus.app')
+        stage.mkdirs()
+
+        copy { from app; into new File(stage, 'Ramus.app') }
+
+        // Add Applications symlink for drag-and-drop install
+        exec {
+            workingDir stage
+            commandLine 'bash', '-lc', 'ln -sfn /Applications Applications || true'
+        }
+
+        def dmgFile = new File(base, 'Ramus.dmg')
+        if (dmgFile.exists()) dmgFile.delete()
+
+        exec {
+            workingDir base
+            commandLine 'hdiutil', 'create', '-fs', 'HFS+', '-volname', 'Ramus', '-srcfolder', stage.absolutePath, dmgFile.absolutePath
+        }
+        println "DMG created at: ${dmgFile}"
+    }
+}
+
+task macDmgWithJre(dependsOn: macBundleWithJre) {
+    description = 'Build Ramus.dmg with embedded JRE(s) (drag-and-drop)'
+    doLast {
+        def base = file("$buildDir/macos")
+        def stage = new File(base, 'dmg')
+        def app = new File(base, 'Ramus.app')
+        stage.mkdirs()
+
+        copy { from app; into new File(stage, 'Ramus.app') }
+        exec { workingDir stage; commandLine 'bash', '-lc', 'ln -sfn /Applications Applications || true' }
+
+        def dmgFile = new File(base, 'Ramus.dmg')
+        if (dmgFile.exists()) dmgFile.delete()
+        exec { workingDir base; commandLine 'hdiutil', 'create', '-fs', 'HFS+', '-volname', 'Ramus', '-srcfolder', stage.absolutePath, dmgFile.absolutePath }
+        println "DMG created at: ${dmgFile}"
+    }
+}
+
+// Styled DMG with custom background and icon layout
+// Place background image at dest/macos/dmg-background.png (or pass -PdmgBackground=/path/to/image.png)
+task macDmgStyled(dependsOn: macBundle) {
+    description = 'Build styled Ramus.dmg with background and layout'
+    doLast {
+        def base = file("$buildDir/macos")
+        def stage = new File(base, 'dmg_styled')
+        def app = new File(base, 'Ramus.app')
+        project.delete(stage)
+        stage.mkdirs()
+
+        // Copy app and Applications symlink
+        copy { from app; into new File(stage, 'Ramus.app') }
+        exec { workingDir stage; commandLine 'bash', '-lc', 'ln -sfn /Applications Applications || true' }
+
+        // Background image
+        def bgSrc = project.findProperty('dmgBackground') ? file(project.findProperty('dmgBackground')) : file('dest/macos/dmg-background.png')
+        def bgExists = bgSrc.exists()
+        int bgW = 700; int bgH = 500;
+        if (bgExists) {
+            try {
+                def img = javax.imageio.ImageIO.read(bgSrc)
+                if (img != null) { bgW = img.getWidth(null); bgH = img.getHeight(null) }
+            } catch (Throwable ignore) {}
+        }
+        if (bgExists) {
+            def bgDir = new File(stage, '.background')
+            bgDir.mkdirs()
+            copy { from bgSrc; into bgDir; rename { 'background.png' } }
+        } else {
+            println "[macDmgStyled] No background image found. Place at dest/macos/dmg-background.png or pass -PdmgBackground=..."
+        }
+
+        // Create R/W DMG
+        def rwDmg = new File(base, 'Ramus-rw.dmg')
+        if (rwDmg.exists()) rwDmg.delete()
+        exec { workingDir base; commandLine 'hdiutil', 'create', '-fs', 'HFS+', '-volname', 'Ramus', '-format', 'UDRW', '-srcfolder', stage.absolutePath, rwDmg.absolutePath }
+
+        // Detach any previous mounts named Ramus*
+        exec { ignoreExitValue true; commandLine 'bash','-lc','for v in /Volumes/Ramus*; do hdiutil detach "$v" -quiet || true; done' }
+
+        // Attach to a known unique mount point to avoid parsing/awk issues
+        def mountPoint = "/Volumes/RamusTmp-" + System.currentTimeMillis()
+        exec { commandLine 'bash','-lc', "hdiutil attach -readwrite -noverify -noautoopen -mountpoint '${mountPoint}' '${rwDmg.absolutePath}'" }
+        Thread.sleep(500)
+
+        int ramusX = (int)(bgW * 0.25); int ramusY = (int)(bgH * 0.55);
+        int applX = (int)(bgW * 0.72); int applY = (int)(bgH * 0.55);
+        def osa = ['osascript',
+                '-e', "set mp to POSIX file \"${mountPoint}\" as alias",
+                '-e', 'tell application "Finder"',
+                '-e', 'tell folder mp',
+                '-e', 'open',
+                '-e', 'set current view of container window to icon view',
+                '-e', 'set toolbar visible of container window to false',
+                '-e', 'set statusbar visible of container window to false',
+                '-e', "set bounds of container window to {100, 100, ${100+bgW}, ${100+bgH}}",
+                '-e', 'set theViewOptions to the icon view options of container window',
+                '-e', 'set arrangement of theViewOptions to not arranged',
+                '-e', 'set icon size of theViewOptions to 128',
+        ]
+        if (bgExists) {
+            osa += ['-e', 'set background picture of theViewOptions to file ".background:background.png"']
+        }
+        osa += [
+                '-e', 'delay 0.4',
+                '-e', 'try',
+                '-e', "set position of item \"Ramus.app\" of container window to {${ramusX}, ${ramusY}}",
+                '-e', "set position of item \"Applications\" of container window to {${applX}, ${applY}}",
+                '-e', 'end try',
+                '-e', 'update without registering applications',
+                '-e', 'delay 0.5',
+                '-e', 'close',
+                '-e', 'open',
+                '-e', 'delay 0.5',
+                '-e', 'end tell',
+                '-e', 'end tell'
+        ]
+        exec { commandLine osa }
+
+        // Hide helper/system folders and clean up before detach
+        exec {
+            ignoreExitValue true
+            commandLine 'bash','-lc', "(command -v SetFile >/dev/null 2>&1 && SetFile -a V '${mountPoint}/.background') || true; chflags hidden '${mountPoint}/.background' || true; rm -rf '${mountPoint}/.fseventsd' '${mountPoint}/.Spotlight-V100' '${mountPoint}/.Trashes' '${mountPoint}/.TemporaryItems' || true; sync"
+        }
+
+        // Detach and convert to compressed UDZO
+        exec { ignoreExitValue true; commandLine 'hdiutil', 'detach', mountPoint, '-quiet' }
+        Thread.sleep(800)
+        def dmgFile = new File(base, 'Ramus.dmg')
+        if (dmgFile.exists()) dmgFile.delete()
+        exec { workingDir base; commandLine 'hdiutil', 'convert', '-format', 'UDZO', '-imagekey', 'zlib-level=9', '-o', dmgFile.absolutePath, rwDmg.absolutePath }
+        println "Styled DMG created at: ${dmgFile}"
+    }
+}
+
+task macDmgWithJreStyled(dependsOn: macBundleWithJre) {
+    description = 'Build styled Ramus.dmg with embedded JRE(s), background and layout'
+    doLast {
+        def base = file("$buildDir/macos")
+        def stage = new File(base, 'dmg_styled')
+        def app = new File(base, 'Ramus.app')
+        project.delete(stage)
+        stage.mkdirs()
+
+        // Copy app and Applications symlink
+        copy { from app; into new File(stage, 'Ramus.app') }
+        exec { workingDir stage; commandLine 'bash', '-lc', 'ln -sfn /Applications Applications || true' }
+
+        // Background image
+        def bgSrc = project.findProperty('dmgBackground') ? file(project.findProperty('dmgBackground')) : file('dest/macos/dmg-background.png')
+        def bgExists = bgSrc.exists()
+        int bgW = 700; int bgH = 500;
+        if (bgExists) {
+            try {
+                def img = javax.imageio.ImageIO.read(bgSrc)
+                if (img != null) { bgW = img.getWidth(null); bgH = img.getHeight(null) }
+            } catch (Throwable ignore) {}
+        }
+        if (bgExists) {
+            def bgDir = new File(stage, '.background')
+            bgDir.mkdirs()
+            copy { from bgSrc; into bgDir; rename { 'background.png' } }
+        } else {
+            println "[macDmgWithJreStyled] No background image found. Place at dest/macos/dmg-background.png or pass -PdmgBackground=..."
+        }
+
+        // Create R/W DMG
+        def rwDmg = new File(base, 'Ramus-rw.dmg')
+        if (rwDmg.exists()) rwDmg.delete()
+        exec { workingDir base; commandLine 'hdiutil', 'create', '-fs', 'HFS+', '-volname', 'Ramus', '-format', 'UDRW', '-srcfolder', stage.absolutePath, rwDmg.absolutePath }
+
+        // Detach any previous mounts named Ramus*
+        exec { ignoreExitValue true; commandLine 'bash','-lc','for v in /Volumes/Ramus*; do hdiutil detach "$v" -quiet || true; done' }
+
+        // Attach to a known unique mount point to avoid parsing/awk issues
+        def mountPoint = "/Volumes/RamusTmp-" + System.currentTimeMillis()
+        exec { commandLine 'bash','-lc', "hdiutil attach -readwrite -noverify -noautoopen -mountpoint '${mountPoint}' '${rwDmg.absolutePath}'" }
+        Thread.sleep(500)
+
+        int ramusX2 = (int)(bgW * 0.25); int ramusY2 = (int)(bgH * 0.55);
+        int applX2 = (int)(bgW * 0.72); int applY2 = (int)(bgH * 0.55);
+        def osa = ['osascript',
+                '-e', "set mp to POSIX file \"${mountPoint}\" as alias",
+                '-e', 'tell application "Finder"',
+                '-e', 'tell folder mp',
+                '-e', 'open',
+                '-e', 'set current view of container window to icon view',
+                '-e', 'set toolbar visible of container window to false',
+                '-e', 'set statusbar visible of container window to false',
+                '-e', "set bounds of container window to {100, 100, ${100+bgW}, ${100+bgH}}",
+                '-e', 'set theViewOptions to the icon view options of container window',
+                '-e', 'set arrangement of theViewOptions to not arranged',
+                '-e', 'set icon size of theViewOptions to 128',
+        ]
+        if (bgExists) {
+            osa += ['-e', 'set background picture of theViewOptions to file ".background:background.png"']
+        }
+        osa += [
+                '-e', 'delay 0.4',
+                '-e', 'try',
+                '-e', "set position of item \"Ramus.app\" of container window to {${ramusX2}, ${ramusY2}}",
+                '-e', "set position of item \"Applications\" of container window to {${applX2}, ${applY2}}",
+                '-e', 'end try',
+                '-e', 'update without registering applications',
+                '-e', 'delay 0.5',
+                '-e', 'close',
+                '-e', 'open',
+                '-e', 'delay 0.5',
+                '-e', 'end tell',
+                '-e', 'end tell'
+        ]
+        exec { commandLine osa }
+
+        // Hide helper/system folders and clean up before detach
+        exec {
+            ignoreExitValue true
+            commandLine 'bash','-lc', "(command -v SetFile >/dev/null 2>&1 && SetFile -a V '${mountPoint}/.background') || true; chflags hidden '${mountPoint}/.background' || true; rm -rf '${mountPoint}/.fseventsd' '${mountPoint}/.Spotlight-V100' '${mountPoint}/.Trashes' '${mountPoint}/.TemporaryItems' || true; sync"
+        }
+
+        // Detach and convert to compressed UDZO
+        exec { ignoreExitValue true; commandLine 'hdiutil', 'detach', mountPoint, '-quiet' }
+        Thread.sleep(800)
+        def dmgFile = new File(base, 'Ramus.dmg')
+        if (dmgFile.exists()) dmgFile.delete()
+        exec { workingDir base; commandLine 'hdiutil', 'convert', '-format', 'UDZO', '-imagekey', 'zlib-level=9', '-o', dmgFile.absolutePath, rwDmg.absolutePath }
+        println "Styled DMG created at: ${dmgFile}"
+    }
+}
+
+// Generate a simple gradient DMG background with optional logo and title
+task genDmgBackground() {
+    description = 'Generate dest/macos/dmg-background.png (gradient + title, optional logo)'
+    doLast {
+        System.setProperty('java.awt.headless', 'true')
+        int width = (project.findProperty('bgWidth') ?: '700') as int
+        int height = (project.findProperty('bgHeight') ?: '500') as int
+        String startHex = (project.findProperty('bgColorStart') ?: '#0F2027') as String
+        String endHex = (project.findProperty('bgColorEnd') ?: '#203A43') as String
+        String title = (project.findProperty('bgText') ?: 'Ramus') as String
+        double logoScale = (project.findProperty('bgLogoScale') ?: '0.4') as double // fraction of width
+        double logoPosX = (project.findProperty('bgLogoX') ?: '0.25') as double     // 0..1 (center position)
+        double logoPosY = (project.findProperty('bgLogoY') ?: '0.5') as double      // 0..1 (center position)
+        File out = file('dest/macos/dmg-background.png')
+        out.parentFile.mkdirs()
+
+        def bi = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        def g = bi.createGraphics()
+        g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+        def start = java.awt.Color.decode(startHex)
+        def end = java.awt.Color.decode(endHex)
+        def gp = new java.awt.GradientPaint(0 as float, 0 as float, start, width as float, height as float, end)
+        g.setPaint(gp)
+        g.fillRect(0, 0, width, height)
+
+        // Optional logo overlay
+        File logo = project.hasProperty('bgLogoPng') ? file(project.property('bgLogoPng')) : null
+        if (logo != null && logo.exists()) {
+            def src = javax.imageio.ImageIO.read(logo)
+            int lw = Math.min(src.getWidth(), (int)(width * logoScale))
+            int lh = (int)(src.getHeight() * (lw / (double)src.getWidth()))
+            int lx = (int)(width * logoPosX - lw / 2)
+            int ly = (int)(height * logoPosY - lh / 2)
+            def scaled = src.getScaledInstance(lw, lh, java.awt.Image.SCALE_SMOOTH)
+            g.drawImage(scaled, lx, ly, null)
+        }
+
+        // Title text with soft shadow
+        def font = new java.awt.Font('SansSerif', java.awt.Font.BOLD, (int)(height * 0.14))
+        g.setFont(font)
+        int tx = (int)(width * 0.55)
+        int ty = (int)(height * 0.6)
+        g.setColor(new java.awt.Color(0, 0, 0, 110))
+        g.drawString(title, tx + 3, ty + 3)
+        g.setColor(java.awt.Color.WHITE)
+        g.drawString(title, tx, ty)
+        g.dispose()
+        javax.imageio.ImageIO.write(bi, 'png', out)
+        println "[genDmgBackground] Wrote ${out}"
+    }
+}
+
+// Generate QR code PNG using macOS CoreImage via JXA (osascript -l JavaScript)
+task genQrPng() {
+    description = 'Generate build/macos/qr.png (pure Java, no external tools)'
+    doLast {
+        def data = (project.findProperty('qrData') ?: 'https://t.me/denypanic') as String
+        int size = (project.findProperty('qrSize') ?: '360') as int
+        def base = file("$buildDir/macos"); base.mkdirs()
+        def outPng = new File(base, 'qr.png')
+        // Compile small QR generator
+        def srcDir = file('dest/tools/qrgen/src/main/java')
+        def classesDir = file("$buildDir/qrgen-classes"); classesDir.mkdirs()
+        ant.javac(srcdir: srcDir, destdir: classesDir, includeantruntime: false, source: '1.8', target: '1.8')
+        // Run generator
+        exec {
+            commandLine 'java', '-cp', classesDir.absolutePath, 'qr.QrPng', data, outPng.absolutePath, Integer.toString(size)
+        }
+        println "[genQrPng] Wrote ${outPng}"
+    }
+}
+
+// Convenience: generate 1440x900 background with embedded QR
+task genQrFromWeb() {
+    description = 'Download QR PNG via web API into build/macos/qr.png'
+    doLast {
+        def data = (project.findProperty('qrData') ?: 'https://t.me/denypanic') as String
+        int size = (project.findProperty('qrSize') ?: '360') as int
+        def base = file("$buildDir/macos"); base.mkdirs()
+        def outPng = new File(base, 'qr.png')
+        def enc = java.net.URLEncoder.encode(data, 'UTF-8')
+        def url = new URL("https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${enc}")
+        url.withInputStream { i -> outPng.withOutputStream { it << i } }
+        println "[genQrFromWeb] Downloaded ${outPng}"
+    }
+}
+
+task genDmgBackgroundQr() {
+    description = 'Generate dest/macos/dmg-background.png with embedded QR (1440x900)'
+    doLast {
+        try {
+            tasks.genQrPng.execute()
+        } catch (Throwable t) {
+            println "[genDmgBackgroundQr] Local QR generation failed, falling back to web API: ${t.class.simpleName}: ${t.message}"
+            tasks.genQrFromWeb.execute()
+        }
+        project.ext.bgWidth = 1440
+        project.ext.bgHeight = 900
+        project.ext.bgText = ''
+        project.ext.bgLogoPng = file("$buildDir/macos/qr.png").absolutePath
+        project.ext.bgLogoScale = 0.22
+        project.ext.bgLogoX = 0.85
+        project.ext.bgLogoY = 0.5
+        tasks.genDmgBackground.execute()
+        println "[genDmgBackgroundQr] Wrote dest/macos/dmg-background.png"
+    }
+}
+
+// Optional: generate .icns from PNG (requires macOS sips/iconutil)
+task macIcon() {
+    description = 'Generate dest/macos/ramus.icns from dest/izpack/icon.png (macOS only)'
+    doLast {
+        def png = file('dest/izpack/icon.png')
+        if (!png.exists()) {
+            println '[macIcon] Source PNG not found at dest/izpack/icon.png'
+            return
+        }
+        def outIcns = file('dest/macos/ramus.icns')
+        outIcns.parentFile.mkdirs()
+        def iconset = file("$buildDir/macos/icon.iconset")
+        iconset.mkdirs()
+        def sizes = [16,32,64,128,256,512]
+        sizes.each { s ->
+            exec { commandLine 'sips', '-z', s.toString(), s.toString(), png.absolutePath, '--out', new File(iconset, "icon_${s}x${s}.png").absolutePath }
+        }
+        exec { commandLine 'iconutil', '-c', 'icns', iconset.absolutePath, '-o', outIcns.absolutePath }
+        println "[macIcon] Generated ${outIcns}"
+    }
+}
