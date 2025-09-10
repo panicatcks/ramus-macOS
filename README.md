@@ -169,7 +169,7 @@ brew install --cask temurin@11
 После установки Java 11 локально для сборки проекта используем эту версию.
 
 ```bash
-export JAVA_HOME=$(/usr/libexec/java_home -v 11
+export JAVA_HOME=$(/usr/libexec/java_home -v 11)
 ```
 
 Билдим проект.
