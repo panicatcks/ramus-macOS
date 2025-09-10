@@ -752,12 +752,15 @@ public class ArrowPainter {
         h = (int) g.getFont().getStringBounds(s, g.getFontRenderContext())
                 .getHeight();
         g.drawString(s, x3 + 2, w - (w - h) / 2);
-        s = PROJECT_T + " ";
+        // Project label
+        final String projectLabel = PROJECT_T + " ";
         final int projectTitileWidth = (int) g.getFont()
-                .getStringBounds(s, g.getFontRenderContext()).getWidth();
-        h = (int) g.getFont().getStringBounds(s, g.getFontRenderContext())
+                .getStringBounds(projectLabel, g.getFontRenderContext()).getWidth();
+        h = (int) g.getFont().getStringBounds(projectLabel, g.getFontRenderContext())
                 .getHeight();
-        g.drawString(s, x3 + 2, 2 * w - (w - h) / 2);
+        final int projectTextY = 2 * w - (w - h) / 2;
+        // Draw label immediately (like original behavior) so it is always visible
+        g.drawString(projectLabel, x3 + 2, projectTextY);
         s = TOP_IDEF_NOTES;
         final int t1 = 4 * w - (w - h) / 2;
         g.drawString(s, x3 + 2, t1);
@@ -784,12 +787,40 @@ public class ArrowPainter {
         final int dw = (int) g.getFont()
                 .getStringBounds(createDate, g.getFontRenderContext())
                 .getWidth();
-        final String pn = projectOptions.getProjectName();
+        String pn = projectOptions.getProjectName();
+        // Fallbacks: some models may miss the persisted project name; try
+        // reading from the base function as a safety net.
+        if (pn == null || pn.trim().isEmpty()) {
+            try {
+                ProjectOptions basePo = movingArea.dataPlugin.getBaseFunction().getProjectOptions();
+                if (basePo != null && basePo.getProjectName() != null && basePo.getProjectName().trim().length() > 0)
+                    pn = basePo.getProjectName();
+            } catch (Throwable ignore) { }
+        }
         g.setFont(font2);
-        movingArea.paintText(g, pn, movingArea.getFBounds(new Rectangle(x3 + 2
-                        + projectTitileWidth, (int) (1.45 * w - (w - h) / 2), x2 - 4
-                        - wi - dw - (x3 + 2 + projectTitileWidth), height - w)),
-                Line.CENTER_ALIGN, 0, true);
+        // Now we can safely compute the space for the project value.
+        final int rightBoundForProject = x2 - 4 - wi - dw;
+        final int leftBoundForProject = x3 + 2 + projectTitileWidth;
+        final int projectValueWidth = rightBoundForProject - leftBoundForProject;
+        if (projectValueWidth <= 10) {
+            // Not enough room: print only trimmed value after the label
+            final String pnInline = (pn == null) ? "" : pn;
+            g.setFont(movingArea.getFont(font2));
+            g.drawString(pnInline, x3 + 2 + projectTitileWidth, projectTextY);
+        } else {
+            // Draw value separately (centered in available rect).
+            if (pn != null && pn.trim().length() > 0) {
+                movingArea.paintText(
+                        g,
+                        pn,
+                        movingArea.getFBounds(new Rectangle(
+                                leftBoundForProject,
+                                (int) (1.45 * w - (w - h) / 2),
+                                projectValueWidth,
+                                height - w)),
+                        Line.CENTER_ALIGN, 0, true);
+            }
+        }
         g.setFont(movingArea.getFont(font2));
         g.drawString(d1, x2 - 2 - wi - dw, w - (w - h) / 2);
         g.drawString(d2, x2 - 2 - wi - dw, 2 * w - (w - h) / 2);

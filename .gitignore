@@ -102,3 +102,7 @@ tmp/
 .texlipse
 /dest/full/
 /dest/LICENSE
+.DS_Store
+
+# Local temporary copies not intended for VCS
+project-navigator/README (2).md

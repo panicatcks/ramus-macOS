@@ -75,6 +75,67 @@ public class Runner implements Commands {
                 System.setProperty("apple.awt.application.name", "Ramus");
             }
         } catch (Throwable ignored) {}
+        
+        // Single-instance and Finder “Open With…” integration on macOS.
+        // When a user double-clicks a .rsf file, Finder sends an AppleEvent
+        // (not argv). We register a best-effort handler via reflection so we
+        // can compile on Java 8 and run on Java 9+.
+        final DesktopComunication[] holder = new DesktopComunication[1];
+        final Runnable openHandlerBinder = new Runnable() {
+            @Override public void run() {
+                try {
+                    // Prefer Java 9+ Desktop OpenFilesHandler if present
+                    Class<?> desktopCls = Class.forName("java.awt.Desktop");
+                    Object desktop = desktopCls.getMethod("getDesktop").invoke(null);
+                    Class<?> handlerIface = Class.forName("java.awt.desktop.OpenFilesHandler");
+                    Class<?> eventCls = Class.forName("java.awt.desktop.OpenFilesEvent");
+                    Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                            handlerIface.getClassLoader(), new Class<?>[]{handlerIface},
+                            (proxy1, method, args1) -> {
+                                if ("openFiles".equals(method.getName()) && args1 != null && args1.length == 1 && eventCls.isInstance(args1[0])) {
+                                    java.util.List<?> files = (java.util.List<?>) eventCls.getMethod("getFiles").invoke(args1[0]);
+                                    if (files != null && !files.isEmpty()) {
+                                        String[] a = new String[files.size()];
+                                        for (int i = 0; i < files.size(); i++) {
+                                            a[i] = new java.io.File(files.get(i).toString()).getAbsolutePath();
+                                        }
+                                        try {
+                                            if (holder[0] != null && holder[0].isClient()) holder[0].send(a); else Runner.this.run(a);
+                                        } catch (Throwable t) {
+                                            t.printStackTrace();
+                                        }
+                                    }
+                                }
+                                return null;
+                            });
+                    desktopCls.getMethod("setOpenFileHandler", handlerIface).invoke(desktop, proxy);
+                    return; // success
+                } catch (Throwable ignore) { /* fall back to com.apple.eawt */ }
+                try {
+                    // Legacy (Apple JDK 6/8) API
+                    Class<?> appCls = Class.forName("com.apple.eawt.Application");
+                    Object app = appCls.getMethod("getApplication").invoke(null);
+                    Class<?> handlerIface = Class.forName("com.apple.eawt.OpenFilesHandler");
+                    Class<?> eventCls = Class.forName("com.apple.eawt.AppEvent$OpenFilesEvent");
+                    Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                            handlerIface.getClassLoader(), new Class<?>[]{handlerIface},
+                            (proxy1, method, args1) -> {
+                                if ("openFiles".equals(method.getName()) && args1 != null && args1.length == 1 && eventCls.isInstance(args1[0])) {
+                                    java.util.List<?> files = (java.util.List<?>) eventCls.getMethod("getFiles").invoke(args1[0]);
+                                    if (files != null && !files.isEmpty()) {
+                                        String[] a = new String[files.size()];
+                                        for (int i = 0; i < files.size(); i++) a[i] = new java.io.File(files.get(i).toString()).getAbsolutePath();
+                                        try {
+                                            if (holder[0] != null && holder[0].isClient()) holder[0].send(a); else Runner.this.run(a);
+                                        } catch (Throwable t) { t.printStackTrace(); }
+                                    }
+                                }
+                                return null;
+                            });
+                    appCls.getMethod("setOpenFileHandler", handlerIface).invoke(app, proxy);
+                } catch (Throwable ignore) { /* no handler available */ }
+            }
+        };
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--hide-splash")) {
                 Metadata.HIDE_SPLASH = true;
@@ -96,6 +157,11 @@ public class Runner implements Commands {
             try {
 
                 final DesktopComunication comunication = createDesktopComunication();
+                holder[0] = comunication; // allow handler to route to running instance
+                if (com.ramussoft.gui.common.PlatformUtils.isMac()) {
+                    // Bind the handler after DesktopComunication is ready
+                    openHandlerBinder.run();
+                }
 
                 if (comunication.isClient()) {
                     comunication.send(args);

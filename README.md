@@ -82,7 +82,7 @@ This project contains Gradle tasks to build a native macOS `.app` bundle and a s
 ### Requirements
 
 - macOS 10.13+ with Command Line Tools (`xcode-select --install`).
-- JDK 8+ to run Gradle (Temurin / Azul / Oracle). The produced app can embed its own JRE.
+- JDK 11 to build and run Gradle tasks. The produced app can embed its own JRE.
 - Built‑in macOS tools used by tasks: `hdiutil`, `osascript`, `sips`, `iconutil`.
 
 ### Quick Start
@@ -115,6 +115,32 @@ This project contains Gradle tasks to build a native macOS `.app` bundle and a s
     - `./gradlew genDmgBackgroundQr -PqrData="https://t.me/denypanic"`
 
 The DMG window is sized to the background image so it’s fully visible. Icon positions are calculated from the background size (Ramus.app on the left, Applications on the right). Only `Ramus.app` and the `Applications` symlink are visible in the DMG.
+
+### Java 11 and Gradle wrapper
+
+Gradle wrapper in this repo is `6.9.4`, which must run on JDK 11/17 (not JDK 20+). If you have multiple JDKs installed and see an error like “Unsupported class file major version 67”, force Gradle to use JDK 11:
+
+```bash
+brew install --cask temurin@11   # if JDK 11 is not installed
+
+export JAVA_HOME=$(/usr/libexec/java_home -v 11)
+export PATH="$JAVA_HOME/bin:$PATH"
+
+# Stop daemons that may run under a different JDK
+./gradlew --stop
+
+# Verify wrapper is using JDK 11
+./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" -v
+
+# Build DMG
+./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" macDmgWithJreStyled
+```
+
+You can also pin JDK 11 for Gradle permanently by adding to `~/.gradle/gradle.properties`:
+
+```
+org.gradle.java.home=/Library/Java/JavaVirtualMachines/temurin-11.jdk/Contents/Home
+```
 
 ### Embedded JRE Options
 
@@ -155,12 +181,23 @@ Contact if you want Gradle tasks for automated signing/notarization.
   - Build hides/cleans these before convert; if Finder shows hidden files globally, `.background` may still appear in list view but it’s hidden.
 - App opens but Java not found:
   - Use the DMG with embedded JRE (`macDmgWithJreStyled`) or ensure network is available for first run of the slim DMG (`macDmgStyled`).
+- Title block: PROJECT value not shown:
+  - Set project name via Model Properties → General → Project name, then press OK.
+  - On small page sizes (A4) earlier versions could hide the value; this was fixed. Update to the latest sources and rebuild.
+  - The label “PROJECT:” is always printed; the value is drawn next to it (inline) if space is tight, or centered in the reserved area otherwise.
+
+### macOS: Open .rsf files with Ramus
+
+- The app bundle declares the `rsf` document type in `Info.plist`, so Finder can associate `.rsf` files with Ramus.
+- First launch `build/macos/Ramus.app` once so the system registers the document type; then double‑clicking a `.rsf` opens it in Ramus.
+- To make Ramus the default app for `.rsf`: Finder → select any `.rsf` → Cmd+I → “Open with” → “Ramus” → “Change All…”.
+- The app supports the macOS “Open With…” event: if Ramus уже запущен, файл откроется в существующем окне.
 
 ## Русский
 
 ### Запуск приложения
 
-1) Установите JDK (Java 8+).
+1) Установите JDK 11.
 
 2) Из корня проекта запустите:
 ```bash
@@ -176,6 +213,15 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 11)
 
 ```bash
 ./gradlew runLocal
+```
+
+Если Gradle ругается на “Unsupported class file major version …”, значит он запустился под новой Java. Форсируйте JDK 11 для Gradle:
+
+```bash
+./gradlew --stop
+export JAVA_HOME=$(/usr/libexec/java_home -v 11)
+export PATH="$JAVA_HOME/bin:$PATH"
+./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" macDmgWithJreStyled
 ```
 
 ### Сборка под macOS: .app и .dmg
@@ -223,6 +269,12 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 11)
 - Горячие клавиши автоматически маппятся на Command (Cmd) вместо Ctrl.
 - Лаунчер использует `-XstartOnFirstThread`, поддерживает офлайн JRE и автоматическую догрузку.
 
+### Открытие файлов .rsf (macOS)
+
+- Приложение объявляет тип документа `.rsf` в `dest/macos/Info.plist`, поэтому Finder предлагает открыть такие файлы в Ramus.
+- После первого запуска `Ramus.app` двойной клик по `.rsf` откроет файл в Ramus. Чтобы сделать Ramus приложением по умолчанию: Finder → Выбрать `.rsf` → Cmd+I → “Открыть в программе” → “Ramus” → “Изменить всё…”.
+- Если приложение уже запущено, файл открывается в текущем окне (обработчик `Open Files`).
+
 ### Подпись и нотаризация (опционально)
 
 - Подписать приложение:
@@ -238,6 +290,11 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 11)
 - `hdiutil: resource busy` во время convert:
   - Сборка автоматически размонтирует том и ждёт; если всё же произошло — закройте окно Finder с томом и повторите.
 - В окне DMG видны `.background` или `.fseventsd`:
+  
+- В шапке не отображается значение «ПРОЕКТ:»:
+  - Укажите «Название проекта» в Свойства модели → Главные → Название проекта и нажмите OK.
+  - На узких листах (A4) старые версии могли скрывать значение — это исправлено. Пересоберите приложение.
+  - Лейбл «ПРОЕКТ:» печатается всегда; значение выводится сразу после лейбла, либо по центру выделенного места (если хватает ширины).
   - Сборка скрывает/удаляет служебные папки перед упаковкой. При включённом показе скрытых файлов Finder может отображать их как скрытые — в нормальном режиме они не видны.
 - Приложение запустилось, но нет Java:
   - Используйте DMG со встроенной JRE (`macDmgWithJreStyled`) или обеспечьте доступ в интернет для авто‑догрузки при первом запуске (`macDmgStyled`).
