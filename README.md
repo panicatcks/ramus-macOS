@@ -163,6 +163,16 @@ Contact if you want Gradle tasks for automated signing/notarization.
 1) Установите JDK (Java 8+).
 
 2) Из корня проекта запустите:
+```bash
+brew install --cask temurin@11
+```
+После установки Java 11 локально для сборки проекта используем эту версию.
+
+```bash
+export JAVA_HOME=$(/usr/libexec/java_home -v 11
+```
+
+Билдим проект.
 
 ```bash
 ./gradlew runLocal
